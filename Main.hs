@@ -49,16 +49,18 @@ persons = isomaniac personAPI host
 data Action
     = Init
     | People [Person]
+    | Refresh
     deriving Show
 
 view' :: [Person] -> HTML Action
-view' persons =
+view' people =
     [hsx|
         <div>
          <p>These are the people in your neighborhood.</p>
          <ul>
-          <% Prelude.map (\p -> <li><% p %></li>) persons %>
+          <% Prelude.map (\p -> <li><% p %></li>) people %>
          </ul>
+         <button onclick=Refresh>Refresh</button>
         </div>
      |]
 
@@ -66,6 +68,7 @@ update' :: Action -> [Person] -> ([Person], Maybe (ReqAction Action))
 update' action people =
     case action of
       Init -> (people, Just (People <$> persons))
+      Refresh -> (people, Just (People <$> persons))
       (People newPeople) -> (newPeople, Nothing)
 
 personMUV :: MUV [Person] Action (ReqAction Action)
@@ -77,6 +80,5 @@ personMUV =
 
 main :: IO ()
 main =
-    do -- print $ keys (fromAscListWith (++) [(3,"c"), ((5::Int),"a"), (2, "b")])
-       muv personMUV (Just Init)
+    do muv personMUV Nothing -- (Just Init)
 
