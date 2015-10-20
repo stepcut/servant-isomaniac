@@ -17,6 +17,7 @@ import Data.ByteString.Lazy (ByteString)
 import Data.Foldable (foldMap)
 import Data.Monoid ((<>))
 import Data.Proxy (Proxy(..))
+import Data.Map
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TL
@@ -75,5 +76,7 @@ personMUV =
         }
 
 main :: IO ()
-main = muv personMUV (Just Init)
+main =
+    do -- print $ keys (fromAscListWith (++) [(3,"c"), ((5::Int),"a"), (2, "b")])
+       muv personMUV (Just Init)
 

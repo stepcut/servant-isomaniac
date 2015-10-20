@@ -30,7 +30,16 @@ import           Data.String.Conversions
 import           Data.Text                  (Text, unpack, pack)
 import           GHC.TypeLits
 import           GHCJS.Buffer               (toByteString)
+import qualified GHCJS.Buffer as Buffer
+
 import           GHCJS.Foreign.Callback
+import           GHCJS.Marshal (FromJSRef(..))
+import           GHCJS.Marshal.Pure (PFromJSRef(pFromJSRef))
+import JavaScript.Cast (unsafeCast)
+import GHCJS.Types (JSRef(..), isNull)
+import GHCJS.Buffer (freeze)
+import qualified JavaScript.TypedArray.ArrayBuffer as ArrayBuffer
+-- import GHCJS.Buffer (SomeArrayBuffer(..))
 -- import           Network.HTTP.Isomaniac        (Response, Manager)
 -- import           Network.HTTP.Media
 -- import qualified Network.HTTP.Types         as H
@@ -158,15 +167,24 @@ mainLoopRemote document body (MUV model update view) mInitAction =
     where
       handleXHR queue decodeVar xhr =
           do -- FIXME: check status
-             decode <- atomically $ takeTMVar decodeVar
-             buf <- getResponse xhr
-             let bs = toByteString 0 Nothing buf
-             case decode bs of
-               Nothing -> return ()
-               (Just action) ->
-                   atomically $ writeTQueue queue action
---             atomically $ writeTQueue queue (h t)
-             return ()
+             rs <- getReadyState xhr
+             case rs of
+               4 -> do decode <- atomically $ takeTMVar decodeVar
+                       txt <- getResponseType xhr
+                       print txt
+                       text <- getStatusText xhr
+                       print txt
+                       ref <- getResponse xhr
+                       if isNull ref
+                        then print "response was null."
+                        else pure ()
+                       buf <- Buffer.createFromArrayBuffer <$> (ArrayBuffer.unsafeFreeze $ pFromJSRef ref)
+                       let bs = toByteString 0 Nothing buf
+                       case decode bs of
+                         Nothing -> return ()
+                         (Just action) ->
+                             atomically $ writeTQueue queue action
+               _ -> pure ()
 
       handleAction queue = \action -> atomically $ writeTQueue queue action
 --      remoteLoop queue xhr = forkIO $
@@ -187,8 +205,9 @@ mainLoopRemote document body (MUV model update view) mInitAction =
                (Just (ReqAction req decoder)) ->
                    do atomically $ putTMVar decodeVar decoder
                       open xhr (method req) (reqPath req) True
+                      setResponseType xhr "arraybuffer"
                       mapM_ (\(h, v) -> setRequestHeader xhr h v) (headers req)
-                      setResponseType xhr "arraybuffer" -- FIXME: do we need to do this everytime?
+                       -- FIXME: do we need to do this everytime?
                       setRequestHeader xhr "Accept" "application/json" -- FIXME, use reqAccept
                       send xhr
 --                      mapM_ (\a -> reqAccept (setRequestHeader "Accept" 
