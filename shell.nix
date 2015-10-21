@@ -5,14 +5,14 @@ let
   inherit (nixpkgs) pkgs;
 
   f = { mkDerivation, base, bytestring, isomaniac, servant, stdenv
-      , text, transformers, exceptions, safe, http-api-data, hsx2hs, hsp
+      , text, transformers, exceptions, safe, http-api-data, hsx2hs, hsp, servant-todo-common
       }:
       mkDerivation {
         pname = "servant-isomaniac";
         version = "0.1.0.0";
         src = ./.;
         libraryHaskellDepends = [
-          base bytestring isomaniac servant text transformers exceptions safe http-api-data hsx2hs hsp
+          base bytestring isomaniac servant text transformers exceptions safe http-api-data hsx2hs hsp servant-todo-common
         ];
         license = stdenv.lib.licenses.bsd3;
       };
