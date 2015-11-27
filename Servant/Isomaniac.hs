@@ -34,10 +34,10 @@ import           GHCJS.Buffer               (toByteString, fromByteString)
 import qualified GHCJS.Buffer as Buffer
 
 import           GHCJS.Foreign.Callback
-import           GHCJS.Marshal (FromJSRef(..))
-import           GHCJS.Marshal.Pure (PFromJSRef(..))
+import           GHCJS.Marshal (FromJSVal(..))
+import           GHCJS.Marshal.Pure (PFromJSVal(..))
 import JavaScript.Cast (unsafeCast)
-import GHCJS.Types (JSRef(..), isNull)
+import GHCJS.Types (JSVal(..), isNull)
 import GHCJS.Buffer (freeze)
 import qualified JavaScript.TypedArray.ArrayBuffer as ArrayBuffer
 -- import GHCJS.Buffer (SomeArrayBuffer(..))
@@ -341,7 +341,7 @@ mainLoopRemote document body (MUV model update view) mInitAction =
                        if isNull ref
                         then print "response was null."
                         else pure ()
-                       buf <- Buffer.createFromArrayBuffer <$> (ArrayBuffer.unsafeFreeze $ pFromJSRef ref)
+                       buf <- Buffer.createFromArrayBuffer <$> (ArrayBuffer.unsafeFreeze $ pFromJSVal ref)
                        let bs = toByteString 0 Nothing buf
                        case decode bs of
                          Nothing -> return ()
