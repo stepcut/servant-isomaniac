@@ -10,6 +10,25 @@ cabal-version:       >=1.10
 
 library
   exposed-modules:     Servant.Isomaniac
+                       Servant.Common.Req
+                       Servant.Common.BaseUrl
   other-extensions:    CPP, DataKinds, FlexibleContexts, FlexibleInstances, InstanceSigs, OverloadedStrings, ScopedTypeVariables, TypeFamilies, TypeOperators, UndecidableInstances, OverlappingInstances
-  build-depends:       base >=4.8 && <4.9, transformers >=0.4 && <0.5, bytestring >=0.10 && <0.11, text >=1.2 && <1.3, isomaniac, servant, exceptions, safe, http-api-data, hsx2hs, hsp
+  build-depends:       ghcjs-base,
+                       aeson,
+                       base,
+                       transformers >=0.4 && <0.5,
+                       bytestring >=0.10 && <0.11,
+                       text >=1.2 && <1.3,
+                       isomaniac,
+                       servant,
+                       exceptions,
+                       safe,
+                       string-conversions,
+                       http-api-data,
+                       http-types,
+                       http-media,
+                       hsx2hs,
+                       hsp,
+                       network-uri,
+                       stm
   default-language:    Haskell2010

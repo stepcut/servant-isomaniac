@@ -79,7 +79,7 @@ instance (HasIsomaniac a, HasIsomaniac b) => HasIsomaniac (a :<|> b) where
     isomaniacWithRoute (Proxy :: Proxy a) req baseurl :<|>
     isomaniacWithRoute (Proxy :: Proxy b) req baseurl
 
-instance (KnownSymbol capture, ToText a, HasIsomaniac sublayout)
+instance (KnownSymbol capture, ToHttpApiData a, HasIsomaniac sublayout)
       => HasIsomaniac (Capture capture a :> sublayout) where
 
   type Isomaniac (Capture capture a :> sublayout) =
@@ -90,7 +90,7 @@ instance (KnownSymbol capture, ToText a, HasIsomaniac sublayout)
                     (appendToPath p req)
                     baseurl
 
-    where p = toText val
+    where p = toUrlPiece val
 
 -- | If you have a 'Put' endpoint in your API, the client
 -- side querying function that is created when calling 'client'
@@ -278,7 +278,7 @@ instance
 -- > -- then you can just use "getBooksBy" to query that endpoint.
 -- > -- 'getBooksBy Nothing' for all books
 -- > -- 'getBooksBy (Just "Isaac Asimov")' to get all books by Isaac Asimov
-instance (KnownSymbol sym, ToText a, HasIsomaniac sublayout)
+instance (KnownSymbol sym, ToHttpApiData a, HasIsomaniac sublayout)
       => HasIsomaniac (QueryParam sym a :> sublayout) where
 
   type Isomaniac (QueryParam sym a :> sublayout) =
