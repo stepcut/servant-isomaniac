@@ -63,7 +63,7 @@ instance Functor ReqAction where
 data MUV  model action remote = MUV
     { model  :: model
     , update :: action -> model -> (model, Maybe remote)
-    , view   :: model  -> HTML action
+    , view   :: model  -> (HTML action, [Canvas])
     }
 
 class HasIsomaniac layout where
@@ -308,12 +308,16 @@ mainLoopRemote :: (Show action) =>
                -> IO ()
 mainLoopRemote document body (MUV model update view) mInitAction =
     do queue <- atomically newTQueue
-       let vdom = view model
+       let (vdom, canvases) = view model
+       -- update HTML
        html <- renderHTML (handleAction queue) document vdom
        removeChildren body
        appendChild body html
+       -- update Canvases
+       mapM_ drawCanvas canvases
 
        decodeVar <- atomically newEmptyTMVar
+       -- xhr request
        xhr <- newXMLHttpRequest
        cb <- asyncCallback (handleXHR queue decodeVar xhr)
        addEventListener xhr (EventTxt "load") cb False
@@ -355,11 +359,14 @@ mainLoopRemote document body (MUV model update view) mInitAction =
       loop xhr queue decodeVar model oldVDom =
           do action <- atomically $ readTQueue queue
              let (model', mremote') = update action model
-             let vdom = view model'
-                 diffs = diff oldVDom vdom
+             let (vdom, canvases) = view model'
+                 diffs = diff oldVDom (Just vdom)
 --             putStrLn $ "action --> " ++ show action
 --             putStrLn $ "diff --> " ++ show diffs
+             -- update HTML
              apply (handleAction queue) document body oldVDom diffs
+             -- update Canvases
+             mapM_ drawCanvas canvases
 --             html <- renderHTML (handleAction queue) document vdom
 --             removeChildren body
 --             appendJSChild body html
