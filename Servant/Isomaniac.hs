@@ -4,6 +4,7 @@
 {-# LANGUAGE FlexibleInstances    #-}
 {-# LANGUAGE InstanceSigs         #-}
 {-# LANGUAGE OverloadedStrings    #-}
+{-# LANGUAGE Rank2Types           #-}
 {-# LANGUAGE ScopedTypeVariables  #-}
 {-# LANGUAGE TypeFamilies         #-}
 {-# LANGUAGE TypeOperators        #-}
@@ -24,11 +25,13 @@ import           Control.Monad.Trans.Except
 import           Data.Aeson (FromJSON, decodeStrict)
 import qualified Data.ByteString as B
 import           Data.ByteString.Lazy       (ByteString, fromStrict, toStrict)
+import           Data.Functor.Identity (Identity(..))
 import qualified Data.Text.Encoding as Text
 import           Data.List
 import           Data.Proxy
 import           Data.String.Conversions
 import           Data.Text                  (Text, unpack, pack)
+import qualified Data.JSString as JS
 import           GHC.TypeLits
 import           GHCJS.Buffer               (toByteString, fromByteString)
 import qualified GHCJS.Buffer as Buffer
@@ -60,9 +63,9 @@ data ReqAction action = ReqAction Req (B.ByteString -> Maybe action)
 instance Functor ReqAction where
     fmap f (ReqAction req decoder) = ReqAction req (\json -> fmap f (decoder json))
 
-data MUV  model action remote = MUV
+data MUV m model action remote = MUV
     { model  :: model
-    , update :: action -> model -> (model, Maybe remote)
+    , update :: action -> model -> m (model, Maybe remote)
     , view   :: model  -> (HTML action, [Canvas])
     }
 
@@ -303,10 +306,11 @@ mainLoopRemote :: (Show action) =>
 --               -> (Text -> action)
                   JSDocument
                -> JSNode
-               -> MUV model action (ReqAction action)
+               -> MUV m model action (ReqAction action)
+               -> (forall a. m a -> IO a)
                -> Maybe action
                -> IO ()
-mainLoopRemote document body (MUV model update view) mInitAction =
+mainLoopRemote document body (MUV model update view) runM mInitAction =
     do queue <- atomically newTQueue
        let (vdom, canvases) = view model
        -- update HTML
@@ -319,8 +323,11 @@ mainLoopRemote document body (MUV model update view) mInitAction =
        decodeVar <- atomically newEmptyTMVar
        -- xhr request
        xhr <- newXMLHttpRequest
-       cb <- asyncCallback (handleXHR queue decodeVar xhr)
-       addEventListener xhr (EventTxt "load") cb False
+--       cb <- asyncCallback (handleXHR queue decodeVar xhr)
+       addEventListener xhr ProgressLoad (\e -> handleXHR queue decodeVar xhr) False
+       w <- window
+--       addEventListener w KeyDown (\e -> js_alert (JS.pack (show (keyCode e))) >> defaultPrevented e >>= \b -> js_alert (JS.pack (show b)) >> preventDefault e >> defaultPrevented e >>= \b -> js_alert (JS.pack (show b)) ) False
+--       addEventListener document KeyUp (\e -> defaultPrevented e >>= \b -> js_alert (JS.pack (show b)) >> preventDefault e >> defaultPrevented e >>= \b -> js_alert (JS.pack (show b)) ) False
 
 --       remoteLoop queue xhr
        case mInitAction of
@@ -358,11 +365,11 @@ mainLoopRemote document body (MUV model update view) mInitAction =
 --          return ()
       loop xhr queue decodeVar model oldVDom =
           do action <- atomically $ readTQueue queue
-             let (model', mremote') = update action model
+             (model', mremote') <- runM (update action model)
              let (vdom, canvases) = view model'
                  diffs = diff oldVDom (Just vdom)
 --             putStrLn $ "action --> " ++ show action
---             putStrLn $ "diff --> " ++ show diffs
+             putStrLn $ "diff --> " ++ show diffs
              -- update HTML
              apply (handleAction queue) document body oldVDom diffs
              -- update Canvases
@@ -395,10 +402,11 @@ mainLoopRemote document body (MUV model update view) mInitAction =
              loop xhr queue decodeVar model' vdom
 
 muv :: (Show action) =>
-       MUV model action (ReqAction action)
+       MUV m model action (ReqAction action)
+    -> (forall a. m a -> IO a)
     -> Maybe action
     -> IO ()
-muv muv initAction =
+muv muv runM initAction =
     do (Just document) <- currentDocument
        murvElem
            <- do mmurv <- getElementById document "murv"
@@ -408,4 +416,7 @@ muv muv initAction =
                         do (Just bodyList) <- getElementsByTagName document "body"
                            (Just body)     <- item bodyList 0
                            return body
-       mainLoopRemote document murvElem muv initAction
+       mainLoopRemote document murvElem muv runM initAction
+
+runIdent :: Identity a -> IO a
+runIdent = pure . runIdentity

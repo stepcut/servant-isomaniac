@@ -19,7 +19,7 @@ library
                        transformers >=0.4 && <0.5,
                        bytestring >=0.10 && <0.11,
                        text >=1.2 && <1.3,
-                       isomaniac >= 0.2 && < 0.3,
+                       isomaniac >= 0.3 && < 0.4,
                        servant,
                        exceptions,
                        safe,
