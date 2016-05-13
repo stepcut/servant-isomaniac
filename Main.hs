@@ -81,4 +81,3 @@ personMUV =
 main :: IO ()
 main =
     do muv personMUV Nothing -- (Just Init)
-

@@ -9,6 +9,13 @@
 {-# LANGUAGE TypeFamilies         #-}
 {-# LANGUAGE TypeOperators        #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE JavaScriptFFI #-}
+{-# LANGUAGE UnliftedFFITypes #-}
+{-# LANGUAGE GHCForeignImportPrim #-}
+{-# LANGUAGE UnboxedTuples #-}
+
 -- #if !MIN_VERSION_base(4,8,0)
 -- {-# LANGUAGE OverlappingInstances #-}
 -- #endif
@@ -22,9 +29,10 @@ import Control.Concurrent.STM.TQueue (TQueue, newTQueue, readTQueue, writeTQueue
 import Control.Concurrent.STM.TMVar (TMVar, newEmptyTMVar, putTMVar, takeTMVar)
 import           Control.Monad
 import           Control.Monad.Trans.Except
-import           Data.Aeson (FromJSON, decodeStrict)
+import           Data.Aeson (FromJSON, ToJSON, decodeStrict, encode)
 import qualified Data.ByteString as B
 import           Data.ByteString.Lazy       (ByteString, fromStrict, toStrict)
+import qualified Data.ByteString.Lazy.Char8 as C
 import           Data.Functor.Identity (Identity(..))
 import qualified Data.Text.Encoding as Text
 import           Data.List
@@ -33,15 +41,20 @@ import           Data.String.Conversions
 import           Data.Text                  (Text, unpack, pack)
 import qualified Data.JSString as JS
 import           GHC.TypeLits
-import           GHCJS.Buffer               (toByteString, fromByteString)
+import           GHCJS.Buffer               (toByteString, fromByteString, getArrayBuffer, createFromArrayBuffer)
 import qualified GHCJS.Buffer as Buffer
 
 import           GHCJS.Foreign.Callback
 import           GHCJS.Marshal (FromJSVal(..))
-import           GHCJS.Marshal.Pure (PFromJSVal(..))
+import           GHCJS.Marshal.Pure (PFromJSVal(..), PToJSVal(..))
 import JavaScript.Cast (unsafeCast)
-import GHCJS.Types (JSVal(..), isNull)
+import GHCJS.Types (JSVal(..), isNull, isUndefined)
 import GHCJS.Buffer (freeze)
+import JavaScript.Web.MessageEvent as WebSockets
+import JavaScript.Web.WebSocket (WebSocket, WebSocketRequest(..))
+-- import JavaScript.TypedArray.ArrayBuffer.Internal
+import qualified JavaScript.Web.WebSocket as WebSockets
+import           JavaScript.TypedArray.ArrayBuffer (ArrayBuffer, MutableArrayBuffer)
 import qualified JavaScript.TypedArray.ArrayBuffer as ArrayBuffer
 -- import GHCJS.Buffer (SomeArrayBuffer(..))
 -- import           Network.HTTP.Isomaniac        (Response, Manager)
@@ -53,20 +66,23 @@ import           Servant.Common.BaseUrl
 import           Servant.Common.Req
 import Network.HTTP.Media (renderHeader)
 import Web.HttpApiData
-
+-- import JavaScript.TypedArray.ArrayBuffer.Internal (SomeArrayBuffer(..))
 import Web.ISO.Diff
 import Web.ISO.Patch
 import Web.ISO.Types
+import GHC.Exts (State#)
 
-data ReqAction action = ReqAction Req (B.ByteString -> Maybe action)
+data ReqAction action
+  = ReqAction Req (B.ByteString -> Maybe action)
 
 instance Functor ReqAction where
     fmap f (ReqAction req decoder) = ReqAction req (\json -> fmap f (decoder json))
 
-data MUV m model action remote = MUV
-    { model  :: model
-    , update :: action -> model -> m (model, Maybe remote)
-    , view   :: model  -> (HTML action, [Canvas])
+data MUV m model ioData action remote = MUV
+    { model     :: model
+    , browserIO :: TQueue action -> action -> model -> IO ioData
+    , update    :: action -> ioData -> model -> (model, Maybe remote)
+    , view      :: model  -> (HTML action, [Canvas])
     }
 
 class HasIsomaniac layout where
@@ -304,13 +320,14 @@ instance (KnownSymbol sym, ToHttpApiData a, HasIsomaniac sublayout)
 -}
 mainLoopRemote :: (Show action) =>
 --               -> (Text -> action)
-                  JSDocument
+                (TQueue action -> IO (remote -> IO ()))
+               -> JSDocument
                -> JSNode
-               -> MUV m model action (ReqAction action)
-               -> (forall a. m a -> IO a)
+               -> MUV m model ioData action remote -- (ReqAction action)
+--               -> (forall a. m a -> IO a)
                -> Maybe action
                -> IO ()
-mainLoopRemote document body (MUV model update view) runM mInitAction =
+mainLoopRemote initRemote document body (MUV model calcIoData update view) {- runM -} mInitAction =
     do queue <- atomically newTQueue
        let (vdom, canvases) = view model
        -- update HTML
@@ -319,24 +336,139 @@ mainLoopRemote document body (MUV model update view) runM mInitAction =
        appendChild body html
        -- update Canvases
        mapM_ drawCanvas canvases
-
-       decodeVar <- atomically newEmptyTMVar
-       -- xhr request
-       xhr <- newXMLHttpRequest
---       cb <- asyncCallback (handleXHR queue decodeVar xhr)
-       addEventListener xhr ProgressLoad (\e -> handleXHR queue decodeVar xhr) False
        w <- window
 --       addEventListener w KeyDown (\e -> js_alert (JS.pack (show (keyCode e))) >> defaultPrevented e >>= \b -> js_alert (JS.pack (show b)) >> preventDefault e >> defaultPrevented e >>= \b -> js_alert (JS.pack (show b)) ) False
 --       addEventListener document KeyUp (\e -> defaultPrevented e >>= \b -> js_alert (JS.pack (show b)) >> preventDefault e >> defaultPrevented e >>= \b -> js_alert (JS.pack (show b)) ) False
 
 --       remoteLoop queue xhr
+       handleRemote <- initRemote queue
        case mInitAction of
          (Just initAction) ->
              handleAction queue initAction
-         Nothing -> return ()
-       loop xhr queue decodeVar model vdom
+         Nothing -> pure ()
+       loop handleRemote {- xhr -} queue {- decodeVar -} model vdom
     where
-      handleXHR queue decodeVar xhr =
+
+      handleAction queue = \action -> atomically $ writeTQueue queue action
+--      remoteLoop queue xhr = forkIO $
+--          return ()
+      loop handleRemote {- xhr -} queue {- decodeVar -} model oldVDom =
+          do action <- atomically $ readTQueue queue
+             ioData <- calcIoData queue action model
+             let (model', mremote') = update action ioData model
+             let (vdom, canvases)   = view model'
+                 diffs = diff oldVDom (Just vdom)
+--             putStrLn $ "action --> " ++ show action
+--             putStrLn $ "diff --> " ++ show diffs
+             -- update HTML
+             apply (handleAction queue) document body oldVDom diffs
+             -- update Canvases
+             mapM_ drawCanvas canvases
+--             html <- renderHTML (handleAction queue) document vdom
+--             removeChildren body
+--             appendJSChild body html
+             case mremote' of
+               Nothing -> pure ()
+               (Just remote) -> handleRemote remote
+{-
+               (Just (ReqAction req decoder)) ->
+                   do atomically $ putTMVar decodeVar decoder
+                      open xhr (method req) ({- "http://localhost:8000" <> -} reqPath req) True
+                      setResponseType xhr "arraybuffer" -- FIXME: do we need to do this everytime?
+                      setRequestHeader xhr "Accept" "application/json" -- FIXME, use reqAccept
+                      mapM_ (\(h, v) -> setRequestHeader xhr h v) (headers req)
+                      case reqBody req of
+                        Nothing -> send xhr
+                        (Just (bdy, ct)) ->
+                            do setRequestHeader xhr "Content-Type" (Text.decodeUtf8 $ renderHeader ct)
+                               let (buffer, _, _) = (fromByteString $ toStrict bdy)
+                               sendArrayBuffer xhr buffer
+                      print "xhr sent."
+--                      mapM_ (\a -> reqAccept (setRequestHeader "Accept"
+                      -- FIXME: QueryString
+-}
+{-
+               (Just remote) ->
+                   do open xhr "POST" url True
+                      sendString xhr (textToJSString remote)
+-}
+             loop handleRemote {- xhr -} queue {- decodeVar -} model' vdom
+{-
+foreign import javascript unsafe
+  "$2.slice($1)" js_slice1_imm :: Int -> SomeArrayBuffer any -> SomeArrayBuffer any
+foreign import javascript unsafe
+  "$3.slice($1,$2)" js_slice_imm :: Int -> Int -> SomeArrayBuffer any -> SomeArrayBuffer any
+
+slice :: Int -> Maybe Int -> SomeArrayBuffer any -> SomeArrayBuffer any
+slice begin (Just end) b = js_slice_imm begin end b
+slice begin _          b = js_slice1_imm begin b
+
+{-# INLINE slice #-}
+-}
+sendRemoteWS :: (ToJSON remote) => WebSocket -> remote -> IO ()
+sendRemoteWS ws remote =
+  do let jstr = JS.pack (C.unpack $ encode remote)
+     WebSockets.send jstr ws
+
+foreign import javascript unsafe  "console[\"log\"]($1)" consoleLog :: JS.JSString -> IO ()
+
+foreign import javascript unsafe "function(buf){ if (!buf) { throw \"checkArrayBuffer: !buf\"; }; if (!(buf instanceof ArrayBuffer)) { throw \"checkArrayBuffer: buf is not an ArrayBuffer\"; }}($1)" checkArrayBuffer :: MutableArrayBuffer -> IO ()
+-- if(!buf || !(buf instanceof ArrayBuffer))
+--    throw "h$wrapBuffer: not an ArrayBuffer"
+
+-- foreign import javascript unsafe
+--   "new ArrayBuffer($1)" js_create :: Int -> State# s -> (# State# s, JSVal #)
+
+foreign import javascript unsafe
+   "new ArrayBuffer($1)" js_create :: Int -> IO MutableArrayBuffer
+
+create :: Int -> IO MutableArrayBuffer
+create n = js_create n
+{-# INLINE create #-}
+
+logMessage :: MessageEvent -> IO ()
+logMessage messageEvent =
+  case WebSockets.getData messageEvent of
+    (StringData str)    -> consoleLog str
+    (ArrayBufferData r) -> do consoleLog "Got ArrayBufferData"
+                              marray <- ArrayBuffer.thaw r
+                              let jsval = (pToJSVal marray)
+                                  buf   = createFromArrayBuffer r :: Buffer.Buffer
+                              ab <- create 10
+                              checkArrayBuffer marray
+                              consoleLog ("checkArrayBuffer passed.")
+                              consoleLog (JS.pack (show (isUndefined jsval)))
+                              consoleLog (JS.pack (show (isNull jsval)))
+                              consoleLog (JS.pack (show (toByteString 0 Nothing buf)))
+                              -- -- (show ((decodeStrict (toByteString 0 Nothing (createFromArrayBuffer r))) :: Maybe WebSocketRes)))
+
+incomingWS :: (MessageEvent -> Maybe action) -> TQueue action -> MessageEvent -> IO ()
+incomingWS decodeAction queue messageEvent =
+  do logMessage messageEvent
+     case decodeAction messageEvent of
+       Nothing -> consoleLog "Failed to decode messageEvent"
+       (Just action) -> atomically $ writeTQueue queue action
+
+initRemoteWS :: (ToJSON remote) => JS.JSString -> (MessageEvent -> Maybe action) -> TQueue action -> IO (remote -> IO ())
+initRemoteWS url' decodeAction queue =
+  do let request = WebSocketRequest { url       = url'
+                                    , protocols = []
+                                    , onClose   = Nothing
+                                    , onMessage = Just (incomingWS decodeAction queue)
+                                    }
+     ws <- WebSockets.connect request
+     pure (sendRemoteWS ws)
+
+initRemoteXHR :: TQueue action -> IO (ReqAction action -> IO ())
+initRemoteXHR queue =
+  do decodeVar <- atomically newEmptyTMVar
+     -- xhr request
+     xhr <- newXMLHttpRequest
+     -- cb <- asyncCallback (handleXHR queue decodeVar xhr)
+     addEventListener xhr ProgressLoad (\e -> handleXHR queue decodeVar xhr) False
+     pure (sendRemoteXHR xhr decodeVar)
+  where
+        handleXHR queue decodeVar xhr =
           do -- FIXME: check status
              rs <- getReadyState xhr
              putStrLn $ "xhr ready state = " ++ show rs
@@ -360,53 +492,30 @@ mainLoopRemote document body (MUV model update view) runM mInitAction =
                              atomically $ writeTQueue queue action
                _ -> pure ()
 
-      handleAction queue = \action -> atomically $ writeTQueue queue action
---      remoteLoop queue xhr = forkIO $
---          return ()
-      loop xhr queue decodeVar model oldVDom =
-          do action <- atomically $ readTQueue queue
-             (model', mremote') <- runM (update action model)
-             let (vdom, canvases) = view model'
-                 diffs = diff oldVDom (Just vdom)
---             putStrLn $ "action --> " ++ show action
-             putStrLn $ "diff --> " ++ show diffs
-             -- update HTML
-             apply (handleAction queue) document body oldVDom diffs
-             -- update Canvases
-             mapM_ drawCanvas canvases
---             html <- renderHTML (handleAction queue) document vdom
---             removeChildren body
---             appendJSChild body html
-             case mremote' of
-               Nothing -> return ()
-               (Just (ReqAction req decoder)) ->
-                   do atomically $ putTMVar decodeVar decoder
-                      open xhr (method req) ({- "http://localhost:8000" <> -} reqPath req) True
-                      setResponseType xhr "arraybuffer" -- FIXME: do we need to do this everytime?
-                      setRequestHeader xhr "Accept" "application/json" -- FIXME, use reqAccept
-                      mapM_ (\(h, v) -> setRequestHeader xhr h v) (headers req)
-                      case reqBody req of
-                        Nothing -> send xhr
-                        (Just (bdy, ct)) ->
-                            do setRequestHeader xhr "Content-Type" (Text.decodeUtf8 $ renderHeader ct)
-                               let (buffer, _, _) = (fromByteString $ toStrict bdy)
-                               sendArrayBuffer xhr buffer
-                      print "xhr sent."
+sendRemoteXHR :: XMLHttpRequest -> TMVar (B.ByteString -> Maybe action) -> ReqAction action -> IO ()
+sendRemoteXHR xhr decodeVar (ReqAction req decoder) =
+  do atomically $ putTMVar decodeVar decoder
+     open xhr (method req) ({- "http://localhost:8000" <> -} reqPath req) True
+     setResponseType xhr "arraybuffer" -- FIXME: do we need to do this everytime?
+     setRequestHeader xhr "Accept" "application/json" -- FIXME, use reqAccept
+     mapM_ (\(h, v) -> setRequestHeader xhr h v) (headers req)
+     case reqBody req of
+       Nothing -> send xhr
+       (Just (bdy, ct)) ->
+         do setRequestHeader xhr "Content-Type" (Text.decodeUtf8 $ renderHeader ct)
+            let (buffer, _, _) = (fromByteString $ toStrict bdy)
+            sendArrayBuffer xhr buffer
+            print "xhr sent."
 --                      mapM_ (\a -> reqAccept (setRequestHeader "Accept"
                       -- FIXME: QueryString
-{-
-               (Just remote) ->
-                   do open xhr "POST" url True
-                      sendString xhr (textToJSString remote)
--}
-             loop xhr queue decodeVar model' vdom
+
 
 muv :: (Show action) =>
-       MUV m model action (ReqAction action)
-    -> (forall a. m a -> IO a)
+       MUV m model ioData action (ReqAction action)
+--    -> (forall a. m a -> IO a)
     -> Maybe action
     -> IO ()
-muv muv runM initAction =
+muv muv {- runM -} initAction =
     do (Just document) <- currentDocument
        murvElem
            <- do mmurv <- getElementById document "murv"
@@ -416,7 +525,26 @@ muv muv runM initAction =
                         do (Just bodyList) <- getElementsByTagName document "body"
                            (Just body)     <- item bodyList 0
                            return body
-       mainLoopRemote document murvElem muv runM initAction
+       mainLoopRemote initRemoteXHR document murvElem muv {- runM -} initAction
+
+muvWS :: (Show action, ToJSON remote) =>
+       MUV m model ioData action remote
+--    -> (forall a. m a -> IO a)
+    -> JS.JSString
+    -> (MessageEvent -> Maybe action)
+    -> Maybe action
+    -> IO ()
+muvWS muv {- runM -} url decodeAction initAction =
+    do (Just document) <- currentDocument
+       murvElem
+           <- do mmurv <- getElementById document "murv"
+                 case mmurv of
+                    (Just murv) -> return (toJSNode murv)
+                    Nothing ->
+                        do (Just bodyList) <- getElementsByTagName document "body"
+                           (Just body)     <- item bodyList 0
+                           return body
+       mainLoopRemote (initRemoteWS url decodeAction) document murvElem muv {- runM -} initAction
 
 runIdent :: Identity a -> IO a
 runIdent = pure . runIdentity
